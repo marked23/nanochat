@@ -33,6 +33,8 @@ autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=torch.bfloat16)
 
 # Evaluate the loss on each split
 tokens_per_step = device_batch_size * sequence_len * ddp_world_size
+print0(f"{tokens_per_step} = {device_batch_size} * {sequence_len} * {ddp_world_size}")
+print0(f"{tokens_per_step} = {device_batch_size * sequence_len * ddp_world_size}")
 assert split_tokens % tokens_per_step == 0, "split_tokens must be divisible by tokens_per_step"
 steps = split_tokens // tokens_per_step
 token_bytes = get_token_bytes(device=device)

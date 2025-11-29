@@ -113,6 +113,14 @@ def sft_data_generator(dataset, batch_size):
             mask_tensor = torch.tensor(mask[1:], dtype=torch.long)
             row_targets[mask_tensor == 0] = -1 # mask out targets where mask is 0
             targets[i, :n-1] = row_targets
+        
+        # Debug: Check if all targets are masked
+        num_valid_targets = (targets != -1).sum().item()
+        if num_valid_targets == 0:
+            print0(f"WARNING: Generated batch with all targets masked! Batch size: {nrows}, ncols: {ncols}")
+            print0(f"  Conversation lengths: {[len(ids) for ids, mask in batch]}")
+            print0(f"  Mask sums: {[sum(mask) for ids, mask in batch]}")
+        
         inputs = inputs.to(device) # move to device
         targets = targets.to(device)
         return inputs, targets
@@ -126,6 +134,10 @@ def sft_data_generator(dataset, batch_size):
             if len(batch) == batch_size:
                 yield collate_and_yield(batch)
                 batch = []
+        # Yield any remaining partial batch at epoch end
+        if len(batch) > 0:
+            yield collate_and_yield(batch)
+            batch = []
 
 examples_per_step = device_batch_size * ddp_world_size
 print0(f"Target examples per step: {target_examples_per_step}")
@@ -176,15 +188,25 @@ for step in range(num_iterations):
         model.eval()
         val_iter = iter(build_val_loader())
         losses = []
+        nan_count = 0
         for _ in range(eval_steps):
             val_inputs, val_targets = next(val_iter)
             with torch.no_grad(), autocast_ctx:
                 loss = model(val_inputs, val_targets)
-            losses.append(loss)
-        val_loss = torch.stack(losses).mean() # average over eval_steps
-        if ddp:
-            dist.all_reduce(val_loss, op=dist.ReduceOp.AVG) # average over ranks
-        val_loss = val_loss.item()
+            # Only include non-NaN losses (NaN occurs when all targets are masked)
+            if not torch.isnan(loss):
+                losses.append(loss)
+            else:
+                nan_count += 1
+        if len(losses) > 0:
+            val_loss = torch.stack(losses).mean() # average over eval_steps
+            if ddp:
+                dist.all_reduce(val_loss, op=dist.ReduceOp.AVG) # average over ranks
+            val_loss = val_loss.item()
+        else:
+            val_loss = float('nan')  # All batches had NaN loss
+        if nan_count > 0:
+            print0(f"Step {step:05d} | Warning: {nan_count}/{eval_steps} validation batches had all targets masked (NaN loss)")
         print0(f"Step {step:05d} | Validation loss: {val_loss:.6f}")
         wandb_run.log({
             "step": step,
@@ -218,8 +240,10 @@ for step in range(num_iterations):
         with autocast_ctx:
             loss = model(train_inputs, train_targets)
         train_loss = loss.detach() # for logging
-        loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
-        loss.backward() # accumulate the gradient
+        # Skip backward if loss is NaN (happens when all targets are masked)
+        if not torch.isnan(loss):
+            loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
+            loss.backward() # accumulate the gradient
         num_tokens += (train_targets >= 0).sum()
     if ddp:
         dist.all_reduce(num_tokens, op=dist.ReduceOp.SUM) # sum over ranks
