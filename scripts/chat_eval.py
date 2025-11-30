@@ -69,12 +69,19 @@ def run_generative_eval(task_object, tokenizer, model, engine, num_samples, max_
 
     # Aggregate results across all ranks
     if ddp:
+        print0(f"[NCCL DEBUG] Rank {ddp_rank}: Starting all_reduce for generative eval")
+        print0(f"[NCCL DEBUG] Rank {ddp_rank}: num_passed={num_passed}, total={total}")
         num_passed_tensor = torch.tensor([num_passed], dtype=torch.long, device=device)
         total_tensor = torch.tensor([total], dtype=torch.long, device=device)
+        print0(f"[NCCL DEBUG] Rank {ddp_rank}: About to call all_reduce on num_passed_tensor")
         dist.all_reduce(num_passed_tensor, op=dist.ReduceOp.SUM)
+        print0(f"[NCCL DEBUG] Rank {ddp_rank}: Completed all_reduce on num_passed_tensor")
+        print0(f"[NCCL DEBUG] Rank {ddp_rank}: About to call all_reduce on total_tensor")
         dist.all_reduce(total_tensor, op=dist.ReduceOp.SUM)
+        print0(f"[NCCL DEBUG] Rank {ddp_rank}: Completed all_reduce on total_tensor")
         num_passed = num_passed_tensor.item()
         total = total_tensor.item()
+        print0(f"[NCCL DEBUG] Rank {ddp_rank}: Final aggregated num_passed={num_passed}, total={total}")
 
     print0("=" * 50)
     print0(f"Final: {num_passed}/{total} ({100*num_passed/total:.2f}%)")
@@ -101,7 +108,18 @@ def run_categorical_eval(task_object, tokenizer, model, batch_size, max_problems
     # Run the evaluation
     letter_to_id_cache = {} # many letters will repeat often, let's save the tokenizer some work
     num_passed, total = 0, 0
-    for i in range(ddp_rank, num_batches, ddp_world_size):
+    
+    # All ranks must do the same number of iterations for FSDP synchronization
+    # Calculate max iterations any rank will need
+    max_iterations = (num_batches + ddp_world_size - 1) // ddp_world_size if ddp else num_batches
+    
+    for iter_idx in range(max_iterations):
+        i = ddp_rank + iter_idx * ddp_world_size
+        
+        # Skip if this rank doesn't have a batch for this iteration
+        if i >= num_batches:
+            continue
+            
         i0, i1 = i * batch_size, min((i + 1) * batch_size, num_problems)
 
         # Prepare the batch of problems. They might all be of different length, so we pad/collate them.
@@ -113,8 +131,10 @@ def run_categorical_eval(task_object, tokenizer, model, batch_size, max_problems
         prompt_ids = torch.tensor(padded_prompt_ids, dtype=torch.long, device=device)
 
         # Get the logits for the whole batch of conversations in parallel (efficiency win here)
+        print(f"[NCCL DEBUG] Rank {ddp_rank}: Batch {i}/{num_batches} - About to call model forward pass")
         with torch.no_grad():
             logits = model(prompt_ids) # (B, T, V)
+        print(f"[NCCL DEBUG] Rank {ddp_rank}: Batch {i}/{num_batches} - Completed model forward pass")
 
         # Focus on the available answer on just the letters corresponding to choices
         # Note that this helps the evaluation a lot because it specifically narrows the focus to only the available letters
@@ -143,12 +163,19 @@ def run_categorical_eval(task_object, tokenizer, model, batch_size, max_problems
 
     # Aggregate results across all ranks
     if ddp:
+        print0(f"[NCCL DEBUG] Rank {ddp_rank}: Starting all_reduce for categorical eval")
+        print0(f"[NCCL DEBUG] Rank {ddp_rank}: num_passed={num_passed}, total={total}")
         num_passed_tensor = torch.tensor([num_passed], dtype=torch.long, device=device)
         total_tensor = torch.tensor([total], dtype=torch.long, device=device)
+        print0(f"[NCCL DEBUG] Rank {ddp_rank}: About to call all_reduce on num_passed_tensor")
         dist.all_reduce(num_passed_tensor, op=dist.ReduceOp.SUM)
+        print0(f"[NCCL DEBUG] Rank {ddp_rank}: Completed all_reduce on num_passed_tensor")
+        print0(f"[NCCL DEBUG] Rank {ddp_rank}: About to call all_reduce on total_tensor")
         dist.all_reduce(total_tensor, op=dist.ReduceOp.SUM)
+        print0(f"[NCCL DEBUG] Rank {ddp_rank}: Completed all_reduce on total_tensor")
         num_passed = num_passed_tensor.item()
         total = total_tensor.item()
+        print0(f"[NCCL DEBUG] Rank {ddp_rank}: Final aggregated num_passed={num_passed}, total={total}")
 
     average = num_passed/total
     print0(f"Final: {num_passed}/{total} ({100*average:.2f}%)")

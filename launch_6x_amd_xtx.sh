@@ -11,6 +11,12 @@
 # CONFIGURATION SECTION - Activity Enable/Disable
 # =============================================================================
 
+# WandB Run Name Configuration
+# Set to empty string to auto-generate incrementing run names (sft0001, sft0002, etc.)
+# Or set manually like: WANDB_RUN=my-custom-run-name
+WANDB_RUN_PREFIX="sft"             # Prefix for auto-generated run names
+WANDB_RUN=""                       # Leave empty for auto-increment, or set manually
+
 # Core Setup
 ENABLE_GPU_CHECK=false
 ENABLE_REPORT_RESET=false           # Reset and initialize report directory
@@ -82,12 +88,30 @@ MID_NUM_ITERATIONS=-1             # Number of midtraining iterations (-1 = train
 MID_EVAL_EVERY=500                # Validation frequency for midtraining
 
 # SFT Configuration
-SFT_DEVICE_BATCH_SIZE=4            # Per-GPU batch size for SFT (default: 4)
-SFT_NUM_ITERATIONS=-1             # Number of SFT iterations (-1 = use num_epochs)
+SFT_DEVICE_BATCH_SIZE=6            # Per-GPU batch size for SFT (default: 4)
+SFT_NUM_ITERATIONS=20             # Number of SFT iterations (-1 = use num_epochs)
+USE_FSDP=true                    # Enable FSDP for parameter-efficient training (set to true to reduce VRAM usage)
 
 # RL Configuration  
 RL_DEVICE_BATCH_SIZE=8             # Per-GPU batch size for RL (default: 8)
 RL_NUM_ITERATIONS=-1              # Number of RL iterations (-1 = train to completion)
+
+
+# =============================================================================
+# LOGGING METHODS
+# =============================================================================
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
+}
+
+log_section() {
+    echo "" | tee -a "$LOG_FILE"
+    echo "=============================================================================" | tee -a "$LOG_FILE"
+    log "$1"
+    echo "=============================================================================" | tee -a "$LOG_FILE"
+    echo "" | tee -a "$LOG_FILE"
+}
 
 # =============================================================================
 # ENVIRONMENT SETUP
@@ -100,9 +124,23 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat"
 mkdir -p $NANOCHAT_BASE_DIR
 
-# wandb setup
+# WandB run name auto-increment
 if [ -z "$WANDB_RUN" ]; then
-    WANDB_RUN=dummy  # Special case: skips logging to wandb
+    # Auto-generate incremental run name
+    COUNTER_FILE="$SCRIPT_DIR/.wandb_run_counter"
+    if [ -f "$COUNTER_FILE" ]; then
+        COUNTER=$(cat "$COUNTER_FILE")
+    else
+        COUNTER=0
+    fi
+    COUNTER=$((COUNTER + 1))
+    echo $COUNTER > "$COUNTER_FILE"
+    WANDB_RUN=$(printf "%s%04d" "$WANDB_RUN_PREFIX" "$COUNTER")
+    log "Auto-generated WandB run name: $WANDB_RUN"
+elif [ "$WANDB_RUN" = "dummy" ]; then
+    log "WandB logging disabled (run=dummy)"
+else
+    log "Using WandB run name: $WANDB_RUN"
 fi
 
 # Log file setup
@@ -117,7 +155,7 @@ export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export TOKENIZERS_PARALLELISM=false
 
 # NCCL basic settings
-export NCCL_DEBUG=OFF
+export NCCL_DEBUG=ON
 export NCCL_TIMEOUT=1800
 export TORCH_DISTRIBUTED_DEBUG=OFF
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
@@ -163,18 +201,6 @@ export PYTORCH_NO_FLASH_ATTN_WARNINGS=1
 # =============================================================================
 # UTILITY FUNCTIONS
 # =============================================================================
-
-log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
-}
-
-log_section() {
-    echo "" | tee -a "$LOG_FILE"
-    echo "=============================================================================" | tee -a "$LOG_FILE"
-    log "$1"
-    echo "=============================================================================" | tee -a "$LOG_FILE"
-    echo "" | tee -a "$LOG_FILE"
-}
 
 run_command() {
     local description="$1"
@@ -430,11 +456,32 @@ fi
 log ""
 
 # =============================================================================
+# VIRTUAL ENVIRONMENT ACTIVATION
+# =============================================================================
+
+log_section "Virtual Environment Activation"
+
+if [ -f "$SCRIPT_DIR/.venv/bin/activate" ]; then
+    log "Activating virtual environment at $SCRIPT_DIR/.venv"
+    source "$SCRIPT_DIR/.venv/bin/activate" 2>&1 | tee -a "$LOG_FILE"
+elif [ -f "$SCRIPT_DIR/venv/bin/activate" ]; then
+    log "Activating virtual environment at $SCRIPT_DIR/venv"
+    source "$SCRIPT_DIR/venv/bin/activate" 2>&1 | tee -a "$LOG_FILE"
+else
+    log "ERROR: No virtual environment found at $SCRIPT_DIR/.venv or $SCRIPT_DIR/venv"
+    log "Please create one with: uv venv && uv sync --extra gpu"
+    exit 1
+fi
+
+log "Virtual environment activated: $(which python)"
+
+# =============================================================================
 # GPU DETECTION AND PARAMETER CALCULATION
 # =============================================================================
 
 if [ "$AUTO_DETECT_GPUS" = true ]; then
-    log "Auto-detecting GPUs..."
+
+    log_section "GPU Detection"
     
     # Try to detect GPUs using Python/PyTorch
     DETECTED_GPUS=$(python -c "import torch; print(torch.cuda.device_count())" 2>/dev/null || echo "0")
@@ -500,25 +547,7 @@ log "  RL device batch size: $RL_DEVICE_BATCH_SIZE"
 log "  WANDB run: $WANDB_RUN"
 log "  Log file: $LOG_FILE"
 
-# =============================================================================
-# VIRTUAL ENVIRONMENT ACTIVATION
-# =============================================================================
 
-log_section "Virtual Environment Activation"
-
-if [ -f "$SCRIPT_DIR/.venv/bin/activate" ]; then
-    log "Activating virtual environment at $SCRIPT_DIR/.venv"
-    source "$SCRIPT_DIR/.venv/bin/activate" 2>&1 | tee -a "$LOG_FILE"
-elif [ -f "$SCRIPT_DIR/venv/bin/activate" ]; then
-    log "Activating virtual environment at $SCRIPT_DIR/venv"
-    source "$SCRIPT_DIR/venv/bin/activate" 2>&1 | tee -a "$LOG_FILE"
-else
-    log "ERROR: No virtual environment found at $SCRIPT_DIR/.venv or $SCRIPT_DIR/venv"
-    log "Please create one with: uv venv && uv sync --extra gpu"
-    exit 1
-fi
-
-log "Virtual environment activated: $(which python)"
 
 # =============================================================================
 # GPU AVAILABILITY CHECK
@@ -762,8 +791,15 @@ fi
 
 if [ "$ENABLE_SFT_TRAIN" = true ]; then
     log_section "Supervised Fine-Tuning"
+    # Convert bash boolean to Python boolean for use_fsdp flag
+    if [ "$USE_FSDP" = true ]; then
+        FSDP_FLAG="True"
+    else
+        FSDP_FLAG="False"
+    fi
     run_command "Run supervised fine-tuning" \
         torchrun --standalone --nproc_per_node=$NUM_GPUS -m scripts.chat_sft -- \
+        --use_fsdp=$FSDP_FLAG \
         --device_batch_size=$SFT_DEVICE_BATCH_SIZE \
         --target_examples_per_step=$SFT_TARGET_EXAMPLES \
         --num_iterations=$SFT_NUM_ITERATIONS \
